@@ -1,7 +1,9 @@
 import allstar
 import os
+import sys
 from io import BytesIO
 from elftools.elf.elffile import ELFFile
+from tqdm import tqdm
 
 # Imported only for error handling
 import json
@@ -15,6 +17,7 @@ class FetchStatistics:
         self.binCmd = binCmd
         # Package stats
         self.skipped_pkg = 0
+        self.empty_pkg = 0
         self.fetched_pkg = 0
         # Error stats
         self.errors = 0
@@ -32,6 +35,9 @@ class FetchStatistics:
 
     def countSkipPkg(self):
         self.skipped_pkg +=1
+
+    def countEmptyPkg(self):
+        self.empty_pkg +=1
 
     def countDecodeErr(self):
         self.decode_err += 1
@@ -55,7 +61,7 @@ class FetchStatistics:
         print("---------------------------------------------------")
         print("Repo size: %d\tPkg last fetched: %s"%(self.repo_size, self.last_pkg))
         print("\nPackage Stats:")
-        print("  # Fetched: %d\t\t\t# Skipped: %d"%(self.fetched_pkg, self.skipped_pkg))
+        print("  # Fetched: %d\t# Skipped: %d\t# Empty: %d"%(self.fetched_pkg, self.skipped_pkg, self.empty_pkg))
         print("  Failed JSON Requests: %d\t# Other Errors: %d"%(self.decode_err, self.errors))
         print("\nFile Stats:")
         print("  Source files downloaded: %d"%(self.fetched_src))
@@ -64,6 +70,12 @@ class FetchStatistics:
         print("      Stripped = %d  Unstripped = %d  Total = %d"%(self.strp_bin, self.dbg_bin, self.found_bin))
         print("  Binaries downloaded: %d"%(self.fetched_bin))
         
+def start_fetch_errorlog(dst_dir, binCmd, srcCmd, overwrite, archs):
+    with open("fetchErrLog.txt", "w") as file:
+        file.write("Error Log for fetchAllstarRepo.py")
+        file.write("\nArguments generated:")
+        file.write("\n\tDirectory: %s BinCmd: %d SrcCmd: %d Overwrite: %s"%(dst_dir, binCmd, srcCmd, overwrite))
+        file.write("\n\tArchs: {}".format(archs))
 
 def contains_debug(elf):
     return bool(elf.get_section_by_name('.debug_info') or
@@ -142,13 +154,13 @@ def fetch_all_pkg_binaries(pkg_bins, dst_dir):
 
         if not contains_symtab(elf):
             strp_bin += 1
-            fext = '.bin'
+            fext = '.sbin'
         elif valid_debug_elf(elf):
             dbg_bin += 1
-            fext = '.sbin'
+            fext = '.bin'
         else:
             fext = '.ubin'
-            print("\nErr: Found uncharacterized binary %s{%s}\n"%(dst_dir,b['name']))
+            #print("\nErr: Found uncharacterized binary %s{%s}\n"%(dst_dir,b['name']))
 
         fetched_bin += 1
         binary_name = dst_dir + '/' + b['name'] + fext
@@ -169,6 +181,26 @@ def fetch_pkg_source_code(pkg_src, dst_dir):
 
     return fetched_src
 
+def check_overwrite(pkg_path, overwrite):
+    skip_bins = False
+    skip_src = False
+    
+    if overwrite:
+        return (skip_bins, skip_src)
+
+    bin_path = os.path.join(pkg_path, "/bin")
+    if os.path.isdir(bin_path):
+        if len(os.listdir(bin_path)):
+            skip_bins = True
+
+    src_path = os.path.join(pkg_path, "/src")
+    if os.path.isdir(src_path):
+        if len(os.listdir(src_path)):
+            skip_src = True
+
+    return (skip_bins, skip_src)
+
+# Map binCmd to its related function
 binariesToFetch = {
     #0: None,
     1: fetch_pkg_stripped_binaries,
@@ -176,57 +208,96 @@ binariesToFetch = {
     3: fetch_all_pkg_binaries
 }
 
-def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd):
+def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
     allstar_packages = repo.package_list()
     stats = FetchStatistics(repo.arch, len(allstar_packages), binCmd)
 
-    for pkg in allstar_packages:
+    repoBar = tqdm(total = len(allstar_packages[20000:22000]), desc="Fetching %s repo..."%repo.arch, position=0)
+    for pkg in allstar_packages[20000:22000]:
 
         pkg = pkg.strip()      
         try:
+            # Create folder ./dest_dir/pkg_arch/
             pkg_path = os.path.join(dst_dir, '{}_{}/'.format(pkg, repo.arch))
-            os.mkdir(pkg_path)
+            
+            if not os.path.isdir(pkg_path):
+                os.mkdir(pkg_path)
+                skip_bins = False
+                skip_src = False
+            else:
+                (skip_bins, skip_src) = check_overwrite(pkg_path, overwrite)
 
-            if(binCmd > 0):
+            if(binCmd > 0) and not skip_bins:
+                # Check number binaries in package by counting Request headers.
+                ## This is also used to trigger possible JSONDecodeError before
+                ## bin folder creation
                 if(len(repo.package_binaries_exist(pkg))):
+                    # Create folder ./dest_dir/pkg_arch/bin/
                     bin_path = os.path.join(pkg_path, "bin")
                     os.mkdir(bin_path)
 
+                    # Request package binaries and dispatch to approprite
+                    ## fetch_*_binaries function for file save selection
                     pkg_bins = repo.package_binaries(pkg)
                     binStats = binariesToFetch[binCmd](pkg_bins, bin_path)
+
+                    # Save stats of encountered and saved binaries
                     stats.countBin(*binStats)
 
+                    # delete /bin folder if empty
                     if not os.listdir(bin_path):
                         os.rmdir(bin_path)
 
-            if(srcCmd):
+            if(srcCmd) and not skip_src:
+                # Request package source code files
+                ## Call before src folder creation in case of JSONDecodeError
+                pkg_src = repo.package_source_code(pkg)
+
+                # Create folder ./dest_dir/pkg_arch/src/
                 src_path = os.path.join(pkg_path, "src")
                 os.mkdir(src_path)
 
-                pkg_src = repo.package_source_code(pkg)
+                # Save (and count) package source files
                 stats.countSrc(fetch_pkg_source_code(pkg_src, src_path))
 
+                # delete /src folder if empty
                 if not os.listdir(src_path):
                     os.rmdir(src_path)
 
         except json.decoder.JSONDecodeError:
+            # Error thrown by allstar library when request in _package_index() 
+            ## does not result with index.json in response. If more than 
+            ## ERR_THRESHOLD occur stop fetching repo. Its assumed this is due
+            ## to bad repo name resulting in 404 response
             stats.countDecodeErr()
             if(stats.decode_err >= ERR_THRESHOLD):
                 break
             pass
 
         except:
+            # Increment number of Other Error occurrences. It is assumed all
+            ## other errors are one offs that can be ignored. These errors
+            ## are passed to prevent early termination of the fetch process
             stats.countError()
+
+            with open("fetchErrLog.txt", "a") as file:
+                file.write("\nError: %s"%pkg_path)
+                file.write(sys.exc_info())
+
             pass
 
         finally:
+            # delete /pkg_arch folder if empty
             if not os.listdir(pkg_path):
                 os.rmdir(pkg_path)
+                stats.countEmptyPkg()
+            elif (binCmd > 0) and skip_bins:
                 stats.countSkipPkg()
-            else: 
+            else:
                 stats.countPackage()
             
             stats.last_pkg = pkg
+            repoBar.update(1)
 
     return stats
 
@@ -270,12 +341,12 @@ if __name__ == '__main__':
      By default fetchAllstarRepo.py fetches only unstripped/debug binaries.'''
 
     examples = '''EXAMPLES:
-     \tFetch unstripped binaries from repos {amd64 x86} to currenct directory:
-     \t\tpython3 fetchAllStarRepo.py -d ./ -a amd64 x86\n
-     \tFetch unstripped binaries and source code from repo {armdv7} to {/data/db/} directory:
-     \t\tpython3 fetchAllStarRepo.py -c -d /data/db/ -a armv7\n
-     \tFetch stripped binaries from repos {amd64 armv7 x86 mipsel ppc64le s390x} to current directory:
-     \t\tpython3 fetchAllStarRepo.py --stripped-only -d ./ -a amd64 armv7 x86 mipsel ppc64le s390x'''
+     \tFetch unstripped binaries from repos {amd64 i386} to currenct directory:
+     \t\tpython3 fetchAllStarRepo.py -d ./ -a amd64 i386\n
+     \tFetch unstripped binaries and source code from repo {armel} to {/data/db/} directory:
+     \t\tpython3 fetchAllStarRepo.py -c -d /data/db/ -a armel\n
+     \tFetch stripped binaries from repos {amd64 armel i386 mipsel ppc64le s390x} to current directory:
+     \t\tpython3 fetchAllStarRepo.py --stripped-only -d ./ -a amd64 armel i386 mipsel ppc64le s390x'''
 
     list_archs = '[amd64 armel i386 mipsel ppc64le s390x]'
     # Keep in mind the ALLSTAR website displays some architecture names differently than
@@ -306,6 +377,7 @@ if __name__ == '__main__':
         help='List of repository architectures to fetch. All supported archs: '+ list_archs)
 
     group2 = parser.add_argument_group('OPTIONAL FETCH ARGS', 'Options related to which file types to fetch from ALLSTAR dataset')
+    group2.add_argument('-w','--overwrite',action='store_true',help='Overwrite existing files when fetching repo')
     group2.add_argument('-s','--include-stripped',action='store_true',help='Include stripped binaries in repository fetch')
     group2.add_argument('-c','--include-source',action='store_true',help='Include source code in repository fetch')
     group2.add_argument('--stripped-only',action='store_true',help='Fetch only stripped binaries (no symtab)')
@@ -369,8 +441,10 @@ if __name__ == '__main__':
     # Assert fetch source files based if all or source flags declared
     srcCmd = args.all | args.include_source | args.source_only
 
+    start_fetch_errorlog(dst_dir, binCmd, srcCmd, args.overwrite, args.archs)
+
     # Loop through each requested architecture for file download
     for arch in args.archs: 
         repo = allstar.AllstarRepo(arch)
-        stats = fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd)
+        stats = fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, args.overwrite)
         stats.printStats()
