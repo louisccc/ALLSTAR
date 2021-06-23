@@ -182,13 +182,6 @@ class FetchStatistics:
         print("  Binaries Encountered:")
         print("      Stripped = %d  Unstripped = %d  Total = %d"%(self.strp_bin, self.dbg_bin, self.found_bin))
         print("  Binaries downloaded: %d"%(self.fetched_bin))
-        
-def start_fetch_errorlog(dst_dir, binCmd, srcCmd, overwrite, archs):
-    with open("fetchErrLog.txt", "w") as file:
-        file.write("Error Log for fetchAllstarRepo.py")
-        file.write("\nArguments generated:")
-        file.write("\n\tDirectory: %s BinCmd: %d SrcCmd: %d Overwrite: %s"%(dst_dir, binCmd, srcCmd, overwrite))
-        file.write("\n\tArchs: {}".format(archs))
 
 def contains_debug(elf):
     return bool(elf.get_section_by_name('.debug_info') or
@@ -325,13 +318,13 @@ def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
     allstar_packages = repo.package_list()
     stats = FetchStatistics(repo.arch, len(allstar_packages), binCmd)
 
-    repoBar = tqdm(total = len(allstar_packages[20000:22000]), desc="Fetching %s repo..."%repo.arch, position=0)
-    for pkg in allstar_packages[20000:22000]:
+    repoBar = tqdm(total = len(allstar_packages), desc="Fetching %s repo..."%repo.arch, position=0)
+    for pkg_name in allstar_packages:
+        pkg_name = pkg_name.strip()      
 
-        pkg = pkg.strip()      
         try:
             # Create folder ./dest_dir/pkg_arch/
-            pkg_path = os.path.join(dst_dir, '{}_{}/'.format(pkg, repo.arch))
+            pkg_path = os.path.join(dst_dir, '{}_{}/'.format(pkg_name, repo.arch))
             
             if not os.path.isdir(pkg_path):
                 os.mkdir(pkg_path)
@@ -340,18 +333,20 @@ def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
             else:
                 (skip_bins, skip_src) = check_overwrite(pkg_path, overwrite)
 
+            repoBar.set_description(desc="Fetching bins in %s from %s..."% (repo.arch, pkg_name))
+            
             if(binCmd > 0) and not skip_bins:
                 # Check number binaries in package by counting Request headers.
                 ## This is also used to trigger possible JSONDecodeError before
                 ## bin folder creation
-                if(len(repo.package_binaries_exist(pkg))):
+                if(len(repo.package_binaries_exist(pkg_name))):
                     # Create folder ./dest_dir/pkg_arch/bin/
                     bin_path = os.path.join(pkg_path, "bin")
                     os.mkdir(bin_path)
 
                     # Request package binaries and dispatch to approprite
                     ## fetch_*_binaries function for file save selection
-                    pkg_bins = repo.package_binaries(pkg)
+                    pkg_bins = repo.package_binaries(pkg_name)
                     binStats = binariesToFetch[binCmd](pkg_bins, bin_path)
 
                     # Save stats of encountered and saved binaries
@@ -364,7 +359,7 @@ def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
             if(srcCmd) and not skip_src:
                 # Request package source code files
                 ## Call before src folder creation in case of JSONDecodeError
-                pkg_src = repo.package_source_code(pkg)
+                pkg_src = repo.package_source_code(pkg_name)
 
                 # Create folder ./dest_dir/pkg_arch/src/
                 src_path = os.path.join(pkg_path, "src")
@@ -393,11 +388,8 @@ def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
             ## are passed to prevent early termination of the fetch process
             stats.countError()
 
-            with open("fetchErrLog.txt", "a") as file:
-                file.write("\nError: %s"%pkg_path)
-                file.write(sys.exc_info())
-
-            pass
+            print("\nError: %s"%pkg_path)
+            print(sys.exc_info())
 
         finally:
             # delete /pkg_arch folder if empty
@@ -409,7 +401,7 @@ def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
             else:
                 stats.countPackage()
             
-            stats.last_pkg = pkg
+            stats.last_pkg = pkg_name
             repoBar.update(1)
 
     return stats
@@ -444,8 +436,6 @@ if __name__ == '__main__':
 
     # Assert fetch source files based if all or source flags declared
     srcCmd = args.all | args.include_source | args.source_only
-
-    start_fetch_errorlog(args.directory, binCmd, srcCmd, args.overwrite, args.archs)
 
     # Loop through each requested architecture for file download
     for arch in args.archs: 
