@@ -1,6 +1,4 @@
-import allstar
-import os
-import sys
+import allstar, argparse, os, sys
 from io import BytesIO
 from elftools.elf.elffile import ELFFile
 from tqdm import tqdm
@@ -8,6 +6,121 @@ from tqdm import tqdm
 # Imported only for error handling
 import json
 ERR_THRESHOLD = 10
+
+class Config: 
+
+    def __init__(self):
+        # The core function of fetchAllstarRepo is fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd)
+        # Prerequisites to use fetch_allstar_repo includes:
+        #       - declare directory location to write repo package folders and files
+        #       - determine dispatch key (binCmd) based on desired selection for binary file download
+        #       - set srcCmd bool flag to enable/disable source file download
+        #       - initiate AllstarRepo object (defined in ./allstar.py)
+        #
+        # Dependant (less usual) libraries: 
+        #       allstar.py - Library for interfacing with the ALLSTAR repo https://allstar.jhuapl.edu/
+        #       pyelftools - ELF file analysis python library
+        #       tqdm       - Progress bar library
+        #       json       - Json library only used for error handling of allstar._package_index 
+        #                     unsuccessful request.Session.get which is only exposed as a JSONDecodeError 
+        #
+        # Dependant local variables: 
+        #       binariesToFetch - Dictionary mapping binCmd to binary fetch functions
+        #       FetchStatistics - A python class for storing and tracking fetch_allstar_repo(...) counters
+        #
+        
+        descript = '''DESCRIPTION:
+        Generates a local ALLSTAR (sub)dataset by pulling the requested file type(s) from the ALLSTAR repo
+        to the designated directory. Files types are defined and recognized as:\n
+        \tunstripped/debug binary \tAn ELF file binary containing a .symtab 
+                                \t\t and .debug_info/.zdebug_info section
+        \tstripped binary         \tAn ELF file binary without a .symtab section
+        \tsource code/file        \tA .c or .cpp file containing package source code\n
+        Fetched files are saved into their designated file type subfolder generated within its associated
+        package directory, creating the following folder hierarchy:\n
+        \tbinary folder \t{DIRECTORY}/{package-name}_{ARCH}/bin/
+        \tsource folder \t{DIRECTORY}/{package-name}_{ARCH}/src/ \n
+        Where unstripped/debug binaries are stored with the '.bin' suffix and stripped binaries are stored
+        with the '.sbin' file extension, uncategorized binaries are stored with the '.ubin' suffix. Empty 
+        folders are removed as each package is done being searched for requested files.\n
+        By default fetchAllstarRepo.py fetches only unstripped/debug binaries.'''
+
+        examples = '''EXAMPLES:
+        \tFetch unstripped binaries from repos {amd64 i386} to currenct directory:
+        \t\tpython3 fetchAllStarRepo.py -d ./ -a amd64 i386\n
+        \tFetch unstripped binaries and source code from repo {armel} to {/data/db/} directory:
+        \t\tpython3 fetchAllStarRepo.py -c -d /data/db/ -a armel\n
+        \tFetch stripped binaries from repos {amd64 armel i386 mipsel ppc64le s390x} to current directory:
+        \t\tpython3 fetchAllStarRepo.py --stripped-only -d ./ -a amd64 armel i386 mipsel ppc64le s390x'''
+
+        list_archs = '[amd64 armel i386 mipsel ppc64le s390x]'
+        # Keep in mind the ALLSTAR website displays some architecture names differently than
+        # how they are named in the database. Passing the website designated name will result
+        # in the pull request terminating early for the specified architecture
+        # 
+        # Website HTML:
+        #    <a href="armel/9mount/">armv7</a> 
+        #    <a href="i386/9mount/">x86</a> 
+        #    <a href="mipsel/9mount/">mipsel</a> 
+        #    <a href="ppc64el/9mount/">ppc64le</a> 
+        #    <a href="s390x/9mount/">s390x</a>
+        #
+        #       Website   Database
+        #      --------------------
+        #       armv7     armel
+        #       x86       i386
+        #       ppc64el   ppc64le
+
+        self.parser = argparse.ArgumentParser(prog="python3 fetchAllstarRepo.py", 
+                                        description=descript, 
+                                        epilog=examples,
+                                        formatter_class=argparse.RawDescriptionHelpFormatter)
+
+        group = self.parser.add_argument_group('REQUIRED ARGS')
+        group.add_argument('-d','--directory',default='./',type=str,help='Output parent directory')
+        group.add_argument('-a','--archs',action='store',dest='archs',type=str,nargs='*',default=["amd64"],
+            help='List of repository architectures to fetch. All supported archs: '+ list_archs)
+
+        group2 = self.parser.add_argument_group('OPTIONAL FETCH ARGS', 'Options related to which file types to fetch from ALLSTAR dataset')
+        group2.add_argument('-w','--overwrite',action='store_true',help='Overwrite existing files when fetching repo')
+        group2.add_argument('-s','--include-stripped',action='store_true',help='Include stripped binaries in repository fetch')
+        group2.add_argument('-c','--include-source',action='store_true',help='Include source code in repository fetch')
+        group2.add_argument('--stripped-only',action='store_true',help='Fetch only stripped binaries (no symtab)')
+        group2.add_argument('--source-only',action='store_true',help='Fetch only source code')
+        group2.add_argument('--unstripped-only',action='store_true',help='Fetch only unstripped binaries with debug info. (default behavior)')
+        group2.add_argument('--all',action='store_true',help='Include all binaries and source code in repository fetch')
+
+    def parse_args(self, input_args):
+        args = self.parser.parse_args(input_args)
+
+        # Check flags for conflicting logic
+        ## Throw error if multiple "only" flags are declared
+        ## Perform logical check if more than one arg is True
+        if(args.unstripped_only 
+            and (args.stripped_only or args.source_only) 
+            or (args.stripped_only and args.source_only)):
+            print("\nErr: Entered conflicting exclusive fetch flags\n")
+            quit()
+
+        ## Throw error if multiple "only" flags are declared
+        if((args.include_stripped or args.include_source or args.all) 
+            and (args.unstripped_only or args.stripped_only or args.source_only)):
+            print("\nErr: Entered conflicting fetch flags\n")
+            quit()
+
+        # Verify directory arg is valid
+        try:
+            dst_dir = args.directory
+            dst_dir = os.path.abspath(dst_dir)
+
+            if not os.path.isdir(dst_dir):
+                raise ValueError("Passed directory invalid")
+            print("\nPulling ALLSTAR repo to %s\n"%dst_dir)
+        except:
+            print("\nErr: Entered invalid directory as an argument\n")
+            quit()
+
+        return args
 
 class FetchStatistics:
     def __init__(self, arch='', rsize = 0, binCmd=2):
@@ -303,116 +416,7 @@ def fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, overwrite=False):
 
 
 if __name__ == '__main__':
-    import argparse
-
-    # The core function of fetchAllstarRepo is fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd)
-    # Prerequisites to use fetch_allstar_repo includes:
-    #       - declare directory location to write repo package folders and files
-    #       - determine dispatch key (binCmd) based on desired selection for binary file download
-    #       - set srcCmd bool flag to enable/disable source file download
-    #       - initiate AllstarRepo object (defined in ./allstar.py)
-    #
-    # Dependant (less usual) libraries: 
-    #       allstar.py - Library for interfacing with the ALLSTAR repo https://allstar.jhuapl.edu/
-    #       pyelftools - ELF file analysis python library
-    #       tqdm       - Progress bar library
-    #       json       - Json library only used for error handling of allstar._package_index 
-    #                     unsuccessful request.Session.get which is only exposed as a JSONDecodeError 
-    #
-    # Dependant local variables: 
-    #       binariesToFetch - Dictionary mapping binCmd to binary fetch functions
-    #       FetchStatistics - A python class for storing and tracking fetch_allstar_repo(...) counters
-    #
-    
-    descript = '''DESCRIPTION:
-     Generates a local ALLSTAR (sub)dataset by pulling the requested file type(s) from the ALLSTAR repo
-     to the designated directory. Files types are defined and recognized as:\n
-     \tunstripped/debug binary \tAn ELF file binary containing a .symtab 
-                               \t\t and .debug_info/.zdebug_info section
-     \tstripped binary         \tAn ELF file binary without a .symtab section
-     \tsource code/file        \tA .c or .cpp file containing package source code\n
-     Fetched files are saved into their designated file type subfolder generated within its associated
-     package directory, creating the following folder hierarchy:\n
-     \tbinary folder \t{DIRECTORY}/{package-name}_{ARCH}/bin/
-     \tsource folder \t{DIRECTORY}/{package-name}_{ARCH}/src/ \n
-     Where unstripped/debug binaries are stored with the '.bin' suffix and stripped binaries are stored
-     with the '.sbin' file extension, uncategorized binaries are stored with the '.ubin' suffix. Empty 
-     folders are removed as each package is done being searched for requested files.\n
-     By default fetchAllstarRepo.py fetches only unstripped/debug binaries.'''
-
-    examples = '''EXAMPLES:
-     \tFetch unstripped binaries from repos {amd64 i386} to currenct directory:
-     \t\tpython3 fetchAllStarRepo.py -d ./ -a amd64 i386\n
-     \tFetch unstripped binaries and source code from repo {armel} to {/data/db/} directory:
-     \t\tpython3 fetchAllStarRepo.py -c -d /data/db/ -a armel\n
-     \tFetch stripped binaries from repos {amd64 armel i386 mipsel ppc64le s390x} to current directory:
-     \t\tpython3 fetchAllStarRepo.py --stripped-only -d ./ -a amd64 armel i386 mipsel ppc64le s390x'''
-
-    list_archs = '[amd64 armel i386 mipsel ppc64le s390x]'
-    # Keep in mind the ALLSTAR website displays some architecture names differently than
-    # how they are named in the database. Passing the website designated name will result
-    # in the pull request terminating early for the specified architecture
-    # 
-    # Website HTML:
-    #    <a href="armel/9mount/">armv7</a> 
-    #    <a href="i386/9mount/">x86</a> 
-    #    <a href="mipsel/9mount/">mipsel</a> 
-    #    <a href="ppc64el/9mount/">ppc64le</a> 
-    #    <a href="s390x/9mount/">s390x</a>
-    #
-    #       Website   Database
-    #      --------------------
-    #       armv7     armel
-    #       x86       i386
-    #       ppc64el   ppc64le
-
-    parser = argparse.ArgumentParser(prog="python3 fetchAllstarRepo.py", 
-                                    description=descript, 
-                                    epilog=examples,
-                                    formatter_class=argparse.RawDescriptionHelpFormatter)
-
-    group = parser.add_argument_group('REQUIRED ARGS')
-    group.add_argument('-d','--directory',default='./',type=str,help='Output parent directory')
-    group.add_argument('-a','--archs',action='store',dest='archs',type=str,nargs='*',default=["amd64"],
-        help='List of repository architectures to fetch. All supported archs: '+ list_archs)
-
-    group2 = parser.add_argument_group('OPTIONAL FETCH ARGS', 'Options related to which file types to fetch from ALLSTAR dataset')
-    group2.add_argument('-w','--overwrite',action='store_true',help='Overwrite existing files when fetching repo')
-    group2.add_argument('-s','--include-stripped',action='store_true',help='Include stripped binaries in repository fetch')
-    group2.add_argument('-c','--include-source',action='store_true',help='Include source code in repository fetch')
-    group2.add_argument('--stripped-only',action='store_true',help='Fetch only stripped binaries (no symtab)')
-    group2.add_argument('--source-only',action='store_true',help='Fetch only source code')
-    group2.add_argument('--unstripped-only',action='store_true',help='Fetch only unstripped binaries with debug info. (default behavior)')
-    group2.add_argument('--all',action='store_true',help='Include all binaries and source code in repository fetch')
-
-    args = parser.parse_args()
-
-    # Check flags for conflicting logic
-    ## Throw error if multiple "only" flags are declared
-    ## Perform logical check if more than one arg is True
-    if(args.unstripped_only 
-        and (args.stripped_only or args.source_only) 
-        or (args.stripped_only and args.source_only)):
-        print("\nErr: Entered conflicting exclusive fetch flags\n")
-        quit()
-
-    ## Throw error if multiple "only" flags are declared
-    if((args.include_stripped or args.include_source or args.all) 
-        and (args.unstripped_only or args.stripped_only or args.source_only)):
-        print("\nErr: Entered conflicting fetch flags\n")
-        quit()
-
-    # Verify directory arg is valid
-    try:
-        dst_dir = args.directory
-        dst_dir = os.path.abspath(dst_dir)
-
-        if not os.path.isdir(dst_dir):
-            raise ValueError("Passed directory invalid")
-        print("\nPulling ALLSTAR repo to %s\n"%dst_dir)
-    except:
-        print("\nErr: Entered invalid directory as an argument\n")
-        quit()
+    args = Config().parse_args(sys.argv[1:])
 
     # Determine key value for binariesToFetch dispatch table
     ## #0: None,
@@ -441,10 +445,10 @@ if __name__ == '__main__':
     # Assert fetch source files based if all or source flags declared
     srcCmd = args.all | args.include_source | args.source_only
 
-    start_fetch_errorlog(dst_dir, binCmd, srcCmd, args.overwrite, args.archs)
+    start_fetch_errorlog(args.directory, binCmd, srcCmd, args.overwrite, args.archs)
 
     # Loop through each requested architecture for file download
     for arch in args.archs: 
         repo = allstar.AllstarRepo(arch)
-        stats = fetch_allstar_repo(repo, dst_dir, binCmd, srcCmd, args.overwrite)
+        stats = fetch_allstar_repo(repo, args.directory, binCmd, srcCmd, args.overwrite)
         stats.printStats()
