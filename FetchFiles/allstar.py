@@ -36,9 +36,10 @@ class AllstarRepo(object):
     def __init__(self, arch, base_url='https://allstar.jhuapl.edu'):
         self.arch = arch
         self.base_url = base_url
+        self.timeout = 60 # seconds to wait for server before timing out
         retry_settings = Retry(
             total=3,
-            status_forcelist=[429, 500, 502, 503, 504],
+            status_forcelist=[408, 429, 500, 502, 503, 504],
             method_whitelist=["HEAD", "GET"]
         )
         adapter = HTTPAdapter(max_retries=retry_settings)
@@ -67,11 +68,9 @@ class AllstarRepo(object):
                                                                    self.arch, pkg))
         index_url = urljoin(pkg_url, 'index.json')
         response = self.rsession.get(index_url)
+        response.raise_for_status()
 
-        if(response.status_code >= 300):
-            return (None, response.status_code)
-
-        return (response.json(strict=False), response.status_code)
+        return response.json(strict=False)
 
     def package_list(self):
         return list(self.packages.keys())
@@ -79,7 +78,7 @@ class AllstarRepo(object):
 
     def package_source_code(self, pkg):
         sources = []
-        (index, stat_code) = self._package_index(pkg)
+        index = self._package_index(pkg)
 
         for i in range(0, len(index['binaries'])):
             pieces = []
@@ -90,7 +89,8 @@ class AllstarRepo(object):
                     source_url = urljoin(self.base_url, 
                                         '/repo/p{}/{}/{}/{}'.format(self._package_part(pkg),
                                                              self.arch, pkg, sf))
-                    r = self.rsession.get(source_url)
+                    r = self.rsession.get(source_url, timeout = self.timeout)
+                    r.raise_for_status()
                     pieces.append({'name': index['binaries'][i]['units'][j]['source'],
                                 'content': r.content})
             sources.append({'name': index['binaries'][i]['name'],
@@ -102,7 +102,7 @@ class AllstarRepo(object):
     # Returns a list of booleans where len(list) is the number of binaries found
     def package_binaries_exist(self, pkg):
         binaries = []
-        (index, stat_code) = self._package_index(pkg)
+        index = self._package_index(pkg)
 
         for i in range(0, len(index['binaries'])):
             f = index['binaries'][i]['file']
@@ -119,7 +119,7 @@ class AllstarRepo(object):
 
     def package_binaries(self, pkg):
         binaries = []
-        (index, stat_code) = self._package_index(pkg)
+        index = self._package_index(pkg)
 
         for i in range(0, len(index['binaries'])):
             f = index['binaries'][i]['file']
@@ -127,7 +127,8 @@ class AllstarRepo(object):
                                  '/repo/p{}/{}/{}/{}'.format(self._package_part(pkg),
                                                              self.arch, pkg, f))
             #print(binary_url)
-            r = self.rsession.get(binary_url)
+            r = self.rsession.get(binary_url, timeout = self.timeout)
+            r.raise_for_status()
             binaries.append({'name': index['binaries'][i]['name'],
                              'content': r.content})
 
@@ -135,7 +136,7 @@ class AllstarRepo(object):
 
     def download_arm_binaries(self,pkg):
         binaries = []
-        (index, stat_code) = self._package_index(pkg)
+        index = self._package_index(pkg)
 
         # if index["arch"] != "arm":
         #     print(index["package"], index["arch"])
@@ -148,7 +149,8 @@ class AllstarRepo(object):
             binary_url = urljoin(self.base_url,
                                  '/repo/p{}/{}/{}/{}'.format(self._package_part(pkg),
                                                              self.arch, pkg, f))
-            r = self.rsession.head(binary_url)
+            r = self.rsession.head(binary_url, timeout = self.timeout)
+            r.raise_for_status()
             binaries.append({'name': index['binaries'][i]['name'],
                              'content': r.content})
         return binaries
@@ -157,7 +159,7 @@ class AllstarRepo(object):
 
     def package_gimples(self, pkg):
         gimples = []
-        (index, stat_code) = self._package_index(pkg)
+        index = self._package_index(pkg)
 
         for i in range(0, len(index['binaries'])):
             for j in range(0, len(index['binaries'][i]['units'])):
@@ -168,7 +170,8 @@ class AllstarRepo(object):
                                                     self.arch,
                                                     pkg,
                                                     g))
-                    r = self.rsession.get(gimple_url)
+                    r = self.rsession.get(gimple_url, timeout = self.timeout)
+                    r.raise_for_status()
                     gimples.append({'name': index['binaries'][i]['units'][j]['name'],
                                     'content': r.content})
             
